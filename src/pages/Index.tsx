@@ -19,6 +19,15 @@ const Index = () => {
   useSeoMeta({
     title: 'Sats Invaders - Pay Sats. Blast Aliens. Top the Leaderboard.',
     description: 'A retro arcade shooter powered by Bitcoin Lightning. Pay 100 sats for one life, compete for the weekly high score, and claim glory on the Nostr-powered leaderboard.',
+    ogTitle: 'Sats Invaders',
+    ogDescription: 'Pay 100 sats. Get one life. Blast aliens. Top the weekly leaderboard. Powered by Lightning & Nostr.',
+    ogImage: 'https://blossom.ditto.pub/52236416ed95a186ed7edf7d53186f806e54b749c8302efc59603e8b4509fcdf.jpeg',
+    ogType: 'website',
+    ogSiteName: 'Sats Invaders',
+    twitterCard: 'summary_large_image',
+    twitterTitle: 'Sats Invaders',
+    twitterDescription: 'Pay 100 sats. Get one life. Blast aliens. Top the weekly leaderboard.',
+    twitterImage: 'https://blossom.ditto.pub/52236416ed95a186ed7edf7d53186f806e54b749c8302efc59603e8b4509fcdf.jpeg',
   });
 
   const isMobile = useIsMobile();
