@@ -8,7 +8,7 @@ import { Input } from '@/components/ui/input';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import { useAppContext } from '@/hooks/useAppContext';
 import { PAYMENT_AMOUNT_SATS, PAYMENT_RECIPIENT } from '@/lib/gameConstants';
-import { getGameInvoice, isWebLNAvailable, payWithWebLN, checkPaymentSettled } from '@/lib/lightning';
+import { getGameInvoice, isWebLNAvailable, payWithWebLN } from '@/lib/lightning';
 import type { GameInvoice } from '@/lib/lightning';
 
 interface PaymentGateProps {
@@ -17,8 +17,7 @@ interface PaymentGateProps {
   onClose: () => void;
 }
 
-const POLL_INTERVAL_MS = 3000;
-const MANUAL_FALLBACK_MS = 15000; // Show manual button after 15s
+const POLL_INTERVAL_MS = 2500;
 
 export function PaymentGate({ open, onPaid, onClose }: PaymentGateProps) {
   const { nostr } = useNostr();
@@ -31,18 +30,12 @@ export function PaymentGate({ open, onPaid, onClose }: PaymentGateProps) {
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
   const [verifying, setVerifying] = useState(false);
-  const [showManualFallback, setShowManualFallback] = useState(false);
 
   const activeRef = useRef(false);
-  const fallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const stopVerification = useCallback(() => {
     activeRef.current = false;
     setVerifying(false);
-    if (fallbackTimerRef.current) {
-      clearTimeout(fallbackTimerRef.current);
-      fallbackTimerRef.current = null;
-    }
   }, []);
 
   useEffect(() => {
@@ -53,7 +46,6 @@ export function PaymentGate({ open, onPaid, onClose }: PaymentGateProps) {
       setError('');
       setCopied(false);
       setLoading(false);
-      setShowManualFallback(false);
       stopVerification();
     } else {
       stopVerification();
@@ -61,72 +53,78 @@ export function PaymentGate({ open, onPaid, onClose }: PaymentGateProps) {
   }, [open, stopVerification]);
 
   useEffect(() => {
-    return () => {
-      activeRef.current = false;
-      if (fallbackTimerRef.current) clearTimeout(fallbackTimerRef.current);
-    };
+    return () => { activeRef.current = false; };
   }, []);
 
+  /**
+   * Poll Nostr relays for a kind 9735 zap receipt that matches our zap request.
+   *
+   * Per NIP-57, the zap receipt:
+   *  - has kind 9735
+   *  - MUST include a `p` tag with the recipient pubkey
+   *  - MUST include a `P` tag with the sender (zap requester) pubkey
+   *  - MUST include a `description` tag with the JSON of our zap request
+   *  - MUST include a `bolt11` tag with the invoice
+   *
+   * We filter by #p (recipient) to narrow the search, then match by bolt11 or
+   * by the zap request id inside the description tag.
+   */
   const startVerification = useCallback((gameInvoice: GameInvoice, address: string) => {
     stopVerification();
     activeRef.current = true;
     setVerifying(true);
-    setShowManualFallback(false);
-
-    // Show manual fallback button after timeout
-    fallbackTimerRef.current = setTimeout(() => {
-      setShowManualFallback(true);
-    }, MANUAL_FALLBACK_MS);
 
     const onSettled = () => {
       if (!activeRef.current) return;
       activeRef.current = false;
       setVerifying(false);
-      if (fallbackTimerRef.current) clearTimeout(fallbackTimerRef.current);
       onPaid(address, gameInvoice);
     };
 
-    const sinceTimestamp = Math.floor(Date.now() / 1000) - 120;
+    const sinceTimestamp = Math.floor(Date.now() / 1000) - 60;
+    const recipientPubkey = gameInvoice.recipientLnurlPubkey!;
+    const zapRequestId = gameInvoice.zapRequest!.id;
+    const bolt11 = gameInvoice.bolt11;
+
+    // Filter zap receipts by the recipient's p tag — this is indexed by relays
+    // so it's efficient and won't return unrelated zap receipts
+    const filter = [{
+      kinds: [9735],
+      '#p': [recipientPubkey],
+      since: sinceTimestamp,
+      limit: 20,
+    }];
 
     async function poll() {
       if (!activeRef.current) return;
 
-      const checks: Promise<boolean>[] = [];
+      try {
+        const events = await nostr.query(filter, { signal: AbortSignal.timeout(8000) });
 
-      // Check 1: NIP-57 zap receipt on Nostr relays
-      if (gameInvoice.zapRequest) {
-        const zapRequestId = gameInvoice.zapRequest.id;
-        const bolt11 = gameInvoice.bolt11;
-        const filter = [{ kinds: [9735], since: sinceTimestamp, limit: 50 }];
-
-        // Query all configured relays
-        checks.push(
-          (async () => {
-            try {
-              const events = await nostr.query(filter, { signal: AbortSignal.timeout(8000) });
-              return matchZapReceipt(events, zapRequestId, bolt11);
-            } catch {
-              return false;
-            }
-          })(),
-        );
-      }
-
-      // Check 2: LUD-21 verify URL
-      if (gameInvoice.verifyUrl) {
-        checks.push(checkPaymentSettled(gameInvoice.verifyUrl));
-      }
-
-      if (checks.length > 0) {
-        try {
-          const results = await Promise.all(checks);
-          if (results.some(Boolean)) {
+        for (const event of events) {
+          // Match 1: bolt11 tag matches our invoice exactly
+          const bolt11Tag = event.tags.find(([n]) => n === 'bolt11')?.[1];
+          if (bolt11Tag === bolt11) {
             onSettled();
             return;
           }
-        } catch {
-          // ignore
+
+          // Match 2: description tag contains our zap request
+          const descTag = event.tags.find(([n]) => n === 'description')?.[1];
+          if (descTag) {
+            try {
+              const embedded = JSON.parse(descTag);
+              if (embedded.id === zapRequestId) {
+                onSettled();
+                return;
+              }
+            } catch {
+              // skip malformed
+            }
+          }
         }
+      } catch {
+        // query failed, will retry
       }
 
       if (activeRef.current) {
@@ -134,7 +132,8 @@ export function PaymentGate({ open, onPaid, onClose }: PaymentGateProps) {
       }
     }
 
-    setTimeout(poll, 2000);
+    // First poll after a short delay to allow payment propagation
+    setTimeout(poll, 3000);
   }, [nostr, stopVerification, onPaid]);
 
   const handleSubmitAddress = useCallback(async () => {
@@ -159,20 +158,19 @@ export function PaymentGate({ open, onPaid, onClose }: PaymentGateProps) {
       });
       setQrDataUrl(dataUrl);
 
+      // Try WebLN auto-pay first
       if (isWebLNAvailable()) {
         const paid = await payWithWebLN(gameInvoice.bolt11);
         if (paid) {
-          onPaid(trimmed, gameInvoice);
+          // WebLN paid — still wait for zap receipt to verify
+          startVerification(gameInvoice, trimmed);
+          setStep('invoice');
           return;
         }
       }
 
       setStep('invoice');
-
-      const hasVerification = gameInvoice.zapRequest || gameInvoice.verifyUrl;
-      if (hasVerification) {
-        startVerification(gameInvoice, trimmed);
-      }
+      startVerification(gameInvoice, trimmed);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to generate invoice');
     } finally {
@@ -186,8 +184,6 @@ export function PaymentGate({ open, onPaid, onClose }: PaymentGateProps) {
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   }, [invoice]);
-
-  const hasAnyVerification = invoice && (invoice.zapRequest || invoice.verifyUrl);
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
@@ -269,67 +265,20 @@ export function PaymentGate({ open, onPaid, onClose }: PaymentGateProps) {
               <p className="text-destructive text-xs">{error}</p>
             )}
 
-            {hasAnyVerification && verifying ? (
-              <div className="space-y-3">
-                <div className="flex items-center justify-center gap-2 py-3 rounded-md bg-secondary/30 border border-primary/10">
-                  <Loader2 className="size-4 text-primary animate-spin" />
-                  <span className="font-pixel text-[10px] text-primary tracking-wider">
-                    WAITING FOR PAYMENT...
-                  </span>
-                </div>
-                <p className="text-[10px] text-center text-muted-foreground/50">
-                  Pay the invoice — the game starts automatically once confirmed
-                </p>
-
-                {/* Manual fallback after timeout */}
-                {showManualFallback && (
-                  <Button
-                    onClick={() => onPaid(lightningAddress.trim(), invoice)}
-                    variant="outline"
-                    className="w-full border-primary/20 font-pixel text-[10px] hover:bg-primary/10 h-10"
-                  >
-                    ALREADY PAID? TAP HERE
-                  </Button>
-                )}
+            <div className="space-y-3">
+              <div className="flex items-center justify-center gap-2 py-3 rounded-md bg-secondary/30 border border-primary/10">
+                <Loader2 className="size-4 text-primary animate-spin" />
+                <span className="font-pixel text-[10px] text-primary tracking-wider">
+                  {verifying ? 'WAITING FOR PAYMENT...' : 'PREPARING...'}
+                </span>
               </div>
-            ) : (
-              <>
-                <Button
-                  onClick={() => onPaid(lightningAddress.trim(), invoice)}
-                  className="w-full bg-primary text-primary-foreground font-pixel text-xs hover:bg-primary/90 h-12"
-                >
-                  I PAID — START GAME
-                </Button>
-                <p className="text-[10px] text-center text-muted-foreground/50">
-                  Scan with any Lightning wallet, then confirm above
-                </p>
-              </>
-            )}
+              <p className="text-[10px] text-center text-muted-foreground/50">
+                Pay the invoice — the game starts automatically once confirmed
+              </p>
+            </div>
           </div>
         )}
       </DialogContent>
     </Dialog>
   );
-}
-
-function matchZapReceipt(
-  events: { tags: string[][] }[],
-  zapRequestId: string,
-  bolt11: string,
-): boolean {
-  for (const event of events) {
-    const bolt11Tag = event.tags.find(([n]) => n === 'bolt11')?.[1];
-    if (bolt11Tag && bolt11Tag === bolt11) return true;
-
-    const descTag = event.tags.find(([n]) => n === 'description')?.[1];
-    if (descTag) {
-      try {
-        const embedded = JSON.parse(descTag);
-        if (embedded.id === zapRequestId) return true;
-      } catch {
-        // skip
-      }
-    }
-  }
-  return false;
 }

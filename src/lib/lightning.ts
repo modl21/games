@@ -22,21 +22,19 @@ interface LNURLInvoiceResponse {
 
 export interface GameInvoice {
   bolt11: string;
-  /** LUD-21 verify URL (if supported by the LNURL server) */
   verifyUrl: string | null;
-  /** The signed zap request event (if the LNURL server supports NIP-57) */
   zapRequest: NostrEvent | null;
-  /** The ephemeral signer used to sign the zap request */
   signer: NSecSigner;
   /** The nostr pubkey of the LNURL server (signs zap receipts) */
   recipientLnurlPubkey: string | null;
+  /** The pubkey our ephemeral signer used (sender of the zap) */
+  senderPubkey: string | null;
 }
 
 /**
  * Fetch JSON from a URL, trying direct first then falling back to the CORS proxy.
  */
 async function fetchJSON<T>(url: string): Promise<T> {
-  // Try direct first — many Lightning servers set permissive CORS
   try {
     const direct = await fetch(url, { signal: AbortSignal.timeout(8000) });
     if (direct.ok) {
@@ -46,7 +44,6 @@ async function fetchJSON<T>(url: string): Promise<T> {
     // CORS or network error — fall through to proxy
   }
 
-  // Proxy fallback
   const proxied = await fetch(`${CORS_PROXY}${encodeURIComponent(url)}`, {
     signal: AbortSignal.timeout(10000),
   });
@@ -76,9 +73,7 @@ export async function resolveLightningAddress(address: string): Promise<LNURLPay
 }
 
 /**
- * Get an invoice for the game payment.
- * If the LNURL server supports NIP-57, a zap request is included for verification.
- * If it supports LUD-21, a verify URL is included.
+ * Get a zap-formatted invoice for the game payment.
  */
 export async function getGameInvoice(relays: string[]): Promise<GameInvoice> {
   const lnurlPay = await resolveLightningAddress(PAYMENT_RECIPIENT);
@@ -92,47 +87,34 @@ export async function getGameInvoice(relays: string[]): Promise<GameInvoice> {
     );
   }
 
-  // Create an ephemeral signer for this game session
   const sk = generateSecretKey();
   const signer = new NSecSigner(sk);
-  const pubkey = await signer.getPublicKey();
+  const senderPubkey = await signer.getPublicKey();
 
-  const supportsZaps = lnurlPay.allowsNostr === true && !!lnurlPay.nostrPubkey;
-
-  let zapRequest: NostrEvent | null = null;
-  let callbackUrl: string;
-
-  if (supportsZaps) {
-    // Build and sign a NIP-57 zap request (kind 9734)
-    const [recipientName, recipientDomain] = PAYMENT_RECIPIENT.split('@');
-    const recipientPubkey = lnurlPay.nostrPubkey!;
-
-    // Encode the lnurl
-    const lnurlPayUrl = `https://${recipientDomain}/.well-known/lnurlp/${recipientName}`;
-
-    const zapRequestUnsigned = {
-      kind: 9734 as const,
-      content: 'Sats Invaders game payment',
-      tags: [
-        ['relays', ...relays],
-        ['amount', String(amountMsat)],
-        ['p', recipientPubkey],
-      ],
-      created_at: Math.floor(Date.now() / 1000),
-    };
-
-    zapRequest = await signer.signEvent(zapRequestUnsigned);
-
-    // Build callback with zap request
-    const separator = lnurlPay.callback.includes('?') ? '&' : '?';
-    callbackUrl = `${lnurlPay.callback}${separator}amount=${amountMsat}&nostr=${encodeURI(JSON.stringify(zapRequest))}`;
-  } else {
-    // Plain LNURL-pay (no zap support)
-    const separator = lnurlPay.callback.includes('?') ? '&' : '?';
-    callbackUrl = `${lnurlPay.callback}${separator}amount=${amountMsat}`;
+  if (!lnurlPay.allowsNostr || !lnurlPay.nostrPubkey) {
+    throw new Error('Payment recipient does not support zaps');
   }
 
-  // Fetch the invoice
+  const recipientPubkey = lnurlPay.nostrPubkey;
+
+  // Build and sign a NIP-57 zap request (kind 9734)
+  const zapRequestUnsigned = {
+    kind: 9734 as const,
+    content: '',
+    tags: [
+      ['relays', ...relays],
+      ['amount', String(amountMsat)],
+      ['p', recipientPubkey],
+    ],
+    created_at: Math.floor(Date.now() / 1000),
+  };
+
+  const zapRequest = await signer.signEvent(zapRequestUnsigned);
+
+  // Build callback URL with the zap request
+  const separator = lnurlPay.callback.includes('?') ? '&' : '?';
+  const callbackUrl = `${lnurlPay.callback}${separator}amount=${amountMsat}&nostr=${encodeURI(JSON.stringify(zapRequest))}`;
+
   const data = await fetchJSON<LNURLInvoiceResponse>(callbackUrl);
 
   if (!data.pr) {
@@ -144,20 +126,9 @@ export async function getGameInvoice(relays: string[]): Promise<GameInvoice> {
     verifyUrl: data.verify || null,
     zapRequest,
     signer,
-    recipientLnurlPubkey: lnurlPay.nostrPubkey || null,
+    recipientLnurlPubkey: recipientPubkey,
+    senderPubkey,
   };
-}
-
-/**
- * Poll a LUD-21 verify URL to check if an invoice has been settled.
- */
-export async function checkPaymentSettled(verifyUrl: string): Promise<boolean> {
-  try {
-    const data = await fetchJSON<{ settled: boolean }>(verifyUrl);
-    return data.settled === true;
-  } catch {
-    return false;
-  }
 }
 
 /**
