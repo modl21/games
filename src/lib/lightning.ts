@@ -125,7 +125,7 @@ export async function getGameInvoice(relays: string[]): Promise<GameInvoice> {
 
     // Build callback with zap request
     const separator = lnurlPay.callback.includes('?') ? '&' : '?';
-    callbackUrl = `${lnurlPay.callback}${separator}amount=${amountMsat}&nostr=${encodeURIComponent(JSON.stringify(zapRequest))}&lnurl=${encodeURIComponent(lnurlPayUrl)}`;
+    callbackUrl = `${lnurlPay.callback}${separator}amount=${amountMsat}&nostr=${encodeURI(JSON.stringify(zapRequest))}`;
   } else {
     // Plain LNURL-pay (no zap support)
     const separator = lnurlPay.callback.includes('?') ? '&' : '?';

@@ -45,7 +45,7 @@ export const COLOR_BG = '#0a0a0f';
 
 // Payment
 export const PAYMENT_AMOUNT_SATS = 100;
-export const PAYMENT_RECIPIENT = 'odell@primal.net';
+export const PAYMENT_RECIPIENT = 'tony@npubx.cash';
 
 // Nostr
 export const GAME_SCORE_KIND = 1447;

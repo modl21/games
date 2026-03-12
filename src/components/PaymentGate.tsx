@@ -18,6 +18,7 @@ interface PaymentGateProps {
 }
 
 const POLL_INTERVAL_MS = 3000;
+const MANUAL_FALLBACK_MS = 15000; // Show manual button after 15s
 
 export function PaymentGate({ open, onPaid, onClose }: PaymentGateProps) {
   const { nostr } = useNostr();
@@ -30,12 +31,18 @@ export function PaymentGate({ open, onPaid, onClose }: PaymentGateProps) {
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
   const [verifying, setVerifying] = useState(false);
+  const [showManualFallback, setShowManualFallback] = useState(false);
 
   const activeRef = useRef(false);
+  const fallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const stopVerification = useCallback(() => {
     activeRef.current = false;
     setVerifying(false);
+    if (fallbackTimerRef.current) {
+      clearTimeout(fallbackTimerRef.current);
+      fallbackTimerRef.current = null;
+    }
   }, []);
 
   useEffect(() => {
@@ -46,6 +53,7 @@ export function PaymentGate({ open, onPaid, onClose }: PaymentGateProps) {
       setError('');
       setCopied(false);
       setLoading(false);
+      setShowManualFallback(false);
       stopVerification();
     } else {
       stopVerification();
@@ -53,18 +61,28 @@ export function PaymentGate({ open, onPaid, onClose }: PaymentGateProps) {
   }, [open, stopVerification]);
 
   useEffect(() => {
-    return () => { activeRef.current = false; };
+    return () => {
+      activeRef.current = false;
+      if (fallbackTimerRef.current) clearTimeout(fallbackTimerRef.current);
+    };
   }, []);
 
   const startVerification = useCallback((gameInvoice: GameInvoice, address: string) => {
     stopVerification();
     activeRef.current = true;
     setVerifying(true);
+    setShowManualFallback(false);
+
+    // Show manual fallback button after timeout
+    fallbackTimerRef.current = setTimeout(() => {
+      setShowManualFallback(true);
+    }, MANUAL_FALLBACK_MS);
 
     const onSettled = () => {
       if (!activeRef.current) return;
       activeRef.current = false;
       setVerifying(false);
+      if (fallbackTimerRef.current) clearTimeout(fallbackTimerRef.current);
       onPaid(address, gameInvoice);
     };
 
@@ -75,30 +93,13 @@ export function PaymentGate({ open, onPaid, onClose }: PaymentGateProps) {
 
       const checks: Promise<boolean>[] = [];
 
-      // Check 1: NIP-57 zap receipt — search by bolt11 invoice match
+      // Check 1: NIP-57 zap receipt on Nostr relays
       if (gameInvoice.zapRequest) {
         const zapRequestId = gameInvoice.zapRequest.id;
         const bolt11 = gameInvoice.bolt11;
-
-        // Query zap receipts that contain our bolt11 invoice
-        // Use broad filter without authors — the receipt may come from
-        // a different key than the nostrPubkey in the LNURL response
         const filter = [{ kinds: [9735], since: sinceTimestamp, limit: 50 }];
 
-        // Query relay.primal.net directly (primal publishes receipts there)
-        checks.push(
-          (async () => {
-            try {
-              const primalRelay = nostr.relay('wss://relay.primal.net');
-              const events = await primalRelay.query(filter, { signal: AbortSignal.timeout(8000) });
-              return matchZapReceipt(events, zapRequestId, bolt11);
-            } catch {
-              return false;
-            }
-          })(),
-        );
-
-        // Also check all configured relays
+        // Query all configured relays
         checks.push(
           (async () => {
             try {
@@ -279,6 +280,17 @@ export function PaymentGate({ open, onPaid, onClose }: PaymentGateProps) {
                 <p className="text-[10px] text-center text-muted-foreground/50">
                   Pay the invoice — the game starts automatically once confirmed
                 </p>
+
+                {/* Manual fallback after timeout */}
+                {showManualFallback && (
+                  <Button
+                    onClick={() => onPaid(lightningAddress.trim(), invoice)}
+                    variant="outline"
+                    className="w-full border-primary/20 font-pixel text-[10px] hover:bg-primary/10 h-10"
+                  >
+                    ALREADY PAID? TAP HERE
+                  </Button>
+                )}
               </div>
             ) : (
               <>
@@ -300,32 +312,20 @@ export function PaymentGate({ open, onPaid, onClose }: PaymentGateProps) {
   );
 }
 
-/**
- * Match a zap receipt against our zap request.
- * Two matching strategies:
- *  1. The description tag contains our zap request ID
- *  2. The bolt11 tag matches our invoice
- */
 function matchZapReceipt(
   events: { tags: string[][] }[],
   zapRequestId: string,
   bolt11: string,
 ): boolean {
   for (const event of events) {
-    // Match by bolt11 invoice
     const bolt11Tag = event.tags.find(([n]) => n === 'bolt11')?.[1];
-    if (bolt11Tag && bolt11Tag === bolt11) {
-      return true;
-    }
+    if (bolt11Tag && bolt11Tag === bolt11) return true;
 
-    // Match by embedded zap request ID
     const descTag = event.tags.find(([n]) => n === 'description')?.[1];
     if (descTag) {
       try {
         const embedded = JSON.parse(descTag);
-        if (embedded.id === zapRequestId) {
-          return true;
-        }
+        if (embedded.id === zapRequestId) return true;
       } catch {
         // skip
       }
