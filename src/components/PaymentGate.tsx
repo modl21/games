@@ -17,7 +17,7 @@ interface PaymentGateProps {
   onClose: () => void;
 }
 
-const POLL_INTERVAL_MS = 2000;
+const POLL_INTERVAL_MS = 3000;
 
 export function PaymentGate({ open, onPaid, onClose }: PaymentGateProps) {
   const { nostr } = useNostr();
@@ -31,20 +31,13 @@ export function PaymentGate({ open, onPaid, onClose }: PaymentGateProps) {
   const [copied, setCopied] = useState(false);
   const [verifying, setVerifying] = useState(false);
 
-  // Refs for polling/subscription lifecycle
   const activeRef = useRef(false);
-  const abortRef = useRef<AbortController | null>(null);
 
   const stopVerification = useCallback(() => {
     activeRef.current = false;
-    if (abortRef.current) {
-      abortRef.current.abort();
-      abortRef.current = null;
-    }
     setVerifying(false);
   }, []);
 
-  // Reset when dialog opens/closes
   useEffect(() => {
     if (open) {
       setStep('address');
@@ -53,103 +46,94 @@ export function PaymentGate({ open, onPaid, onClose }: PaymentGateProps) {
       setError('');
       setCopied(false);
       setLoading(false);
-      setVerifying(false);
-      activeRef.current = false;
+      stopVerification();
     } else {
       stopVerification();
     }
   }, [open, stopVerification]);
 
-  // Cleanup on unmount
   useEffect(() => {
-    return () => {
-      activeRef.current = false;
-      if (abortRef.current) {
-        abortRef.current.abort();
-      }
-    };
+    return () => { activeRef.current = false; };
   }, []);
 
-  /**
-   * Start watching for payment using the best available method:
-   * 1. NIP-57 zap receipt subscription (if zap request was created)
-   * 2. LUD-21 verify URL polling (if verify URL returned)
-   * Both run concurrently if both are available.
-   */
   const startVerification = useCallback((gameInvoice: GameInvoice, address: string) => {
     stopVerification();
     activeRef.current = true;
     setVerifying(true);
 
-    const abort = new AbortController();
-    abortRef.current = abort;
-
     const onSettled = () => {
       if (!activeRef.current) return;
       activeRef.current = false;
-      stopVerification();
+      setVerifying(false);
       onPaid(address, gameInvoice);
     };
 
-    // Method 1: NIP-57 zap receipt subscription
-    if (gameInvoice.zapRequest && gameInvoice.recipientLnurlPubkey) {
-      const zapRequestId = gameInvoice.zapRequest.id;
-      const lnurlPubkey = gameInvoice.recipientLnurlPubkey;
+    const sinceTimestamp = Math.floor(Date.now() / 1000) - 120;
 
-      (async () => {
-        try {
-          // Subscribe to zap receipts from the LNURL server's nostr pubkey
-          // that contain our zap request in the description
-          for await (const msg of nostr.req(
-            [{ kinds: [9735], authors: [lnurlPubkey], since: Math.floor(Date.now() / 1000) - 60 }],
-            { signal: abort.signal },
-          )) {
-            if (msg[0] === 'EVENT') {
-              const event = msg[2];
-              // Verify this zap receipt matches our zap request
-              const descriptionTag = event.tags.find(([name]: string[]) => name === 'description')?.[1];
-              if (descriptionTag) {
-                try {
-                  const embeddedZapRequest = JSON.parse(descriptionTag);
-                  if (embeddedZapRequest.id === zapRequestId) {
-                    onSettled();
-                    return;
-                  }
-                } catch {
-                  // Ignore parse errors
-                }
-              }
+    async function poll() {
+      if (!activeRef.current) return;
+
+      const checks: Promise<boolean>[] = [];
+
+      // Check 1: NIP-57 zap receipt — search by bolt11 invoice match
+      if (gameInvoice.zapRequest) {
+        const zapRequestId = gameInvoice.zapRequest.id;
+        const bolt11 = gameInvoice.bolt11;
+
+        // Query zap receipts that contain our bolt11 invoice
+        // Use broad filter without authors — the receipt may come from
+        // a different key than the nostrPubkey in the LNURL response
+        const filter = [{ kinds: [9735], since: sinceTimestamp, limit: 50 }];
+
+        // Query relay.primal.net directly (primal publishes receipts there)
+        checks.push(
+          (async () => {
+            try {
+              const primalRelay = nostr.relay('wss://relay.primal.net');
+              const events = await primalRelay.query(filter, { signal: AbortSignal.timeout(8000) });
+              return matchZapReceipt(events, zapRequestId, bolt11);
+            } catch {
+              return false;
             }
+          })(),
+        );
+
+        // Also check all configured relays
+        checks.push(
+          (async () => {
+            try {
+              const events = await nostr.query(filter, { signal: AbortSignal.timeout(8000) });
+              return matchZapReceipt(events, zapRequestId, bolt11);
+            } catch {
+              return false;
+            }
+          })(),
+        );
+      }
+
+      // Check 2: LUD-21 verify URL
+      if (gameInvoice.verifyUrl) {
+        checks.push(checkPaymentSettled(gameInvoice.verifyUrl));
+      }
+
+      if (checks.length > 0) {
+        try {
+          const results = await Promise.all(checks);
+          if (results.some(Boolean)) {
+            onSettled();
+            return;
           }
         } catch {
-          // Subscription ended (abort or error) — ignore
+          // ignore
         }
-      })();
+      }
+
+      if (activeRef.current) {
+        setTimeout(poll, POLL_INTERVAL_MS);
+      }
     }
 
-    // Method 2: LUD-21 verify URL polling
-    if (gameInvoice.verifyUrl) {
-      const verifyUrl = gameInvoice.verifyUrl;
-
-      (async () => {
-        // Wait a moment before first poll
-        await new Promise((r) => setTimeout(r, 1500));
-
-        while (activeRef.current && !abort.signal.aborted) {
-          try {
-            const settled = await checkPaymentSettled(verifyUrl);
-            if (settled) {
-              onSettled();
-              return;
-            }
-          } catch {
-            // Ignore, keep polling
-          }
-          // Wait before next poll
-          await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
-        }
-      })();
-    }
+    setTimeout(poll, 2000);
   }, [nostr, stopVerification, onPaid]);
 
   const handleSubmitAddress = useCallback(async () => {
@@ -167,7 +151,6 @@ export function PaymentGate({ open, onPaid, onClose }: PaymentGateProps) {
       const gameInvoice = await getGameInvoice(relays);
       setInvoice(gameInvoice);
 
-      // Generate QR code
       const dataUrl = await qrcode.toDataURL(gameInvoice.bolt11.toUpperCase(), {
         width: 280,
         margin: 2,
@@ -175,7 +158,6 @@ export function PaymentGate({ open, onPaid, onClose }: PaymentGateProps) {
       });
       setQrDataUrl(dataUrl);
 
-      // Try WebLN auto-pay first
       if (isWebLNAvailable()) {
         const paid = await payWithWebLN(gameInvoice.bolt11);
         if (paid) {
@@ -186,7 +168,6 @@ export function PaymentGate({ open, onPaid, onClose }: PaymentGateProps) {
 
       setStep('invoice');
 
-      // Start verification (zap receipt sub + LUD-21 polling)
       const hasVerification = gameInvoice.zapRequest || gameInvoice.verifyUrl;
       if (hasVerification) {
         startVerification(gameInvoice, trimmed);
@@ -317,4 +298,38 @@ export function PaymentGate({ open, onPaid, onClose }: PaymentGateProps) {
       </DialogContent>
     </Dialog>
   );
+}
+
+/**
+ * Match a zap receipt against our zap request.
+ * Two matching strategies:
+ *  1. The description tag contains our zap request ID
+ *  2. The bolt11 tag matches our invoice
+ */
+function matchZapReceipt(
+  events: { tags: string[][] }[],
+  zapRequestId: string,
+  bolt11: string,
+): boolean {
+  for (const event of events) {
+    // Match by bolt11 invoice
+    const bolt11Tag = event.tags.find(([n]) => n === 'bolt11')?.[1];
+    if (bolt11Tag && bolt11Tag === bolt11) {
+      return true;
+    }
+
+    // Match by embedded zap request ID
+    const descTag = event.tags.find(([n]) => n === 'description')?.[1];
+    if (descTag) {
+      try {
+        const embedded = JSON.parse(descTag);
+        if (embedded.id === zapRequestId) {
+          return true;
+        }
+      } catch {
+        // skip
+      }
+    }
+  }
+  return false;
 }
