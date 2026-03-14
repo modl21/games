@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { useSeoMeta } from '@unhead/react';
 import { Zap, Gamepad2, Smartphone, Keyboard, Play } from 'lucide-react';
 import type { NSecSigner } from '@nostrify/nostrify';
@@ -53,6 +53,21 @@ const Index = () => {
   const handleLaunchGame = useCallback(() => {
     setPhase('playing');
   }, []);
+
+  // Allow keyboard start from READY screen with Space / Enter
+  useEffect(() => {
+    if (phase !== 'ready') return;
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === ' ' || e.key === 'Enter') {
+        e.preventDefault();
+        handleLaunchGame();
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [phase, handleLaunchGame]);
 
   const handleGameOver = useCallback(async (score: number) => {
     setFinalScore(score);
@@ -178,7 +193,7 @@ const Index = () => {
                   </p>
                 ) : (
                   <p className="text-[9px] text-muted-foreground/50 font-pixel">
-                    ARROWS TO MOVE &middot; SPACE TO FIRE
+                    PRESS SPACE OR ENTER TO START
                   </p>
                 )}
               </div>
