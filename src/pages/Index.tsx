@@ -220,7 +220,7 @@ const Index = () => {
         {/* Discrete all-time play counter */}
         <div className="w-full max-w-md mx-auto text-right -mt-1 mb-1">
           <span className="text-[10px] font-pixel text-muted-foreground/40 tracking-wide">
-            RUNS: {(allTimePlayCount ?? 0).toLocaleString()}
+            TOTAL RUNS: {(allTimePlayCount ?? 0).toLocaleString()}
           </span>
         </div>
 
