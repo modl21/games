@@ -37,7 +37,7 @@ export function useCurrentWeekLeaderboard() {
         '#t': [GAME_TAG],
         since: weekStart,
         until: weekEnd,
-        limit: 200,
+        limit: 400,
       }]);
 
       const entries = events
@@ -75,7 +75,7 @@ export function usePreviousWeekWinner() {
         '#t': [GAME_TAG],
         since: prevStart,
         until: prevEnd,
-        limit: 200,
+        limit: 400,
       }]);
 
       const entries = events
@@ -103,5 +103,34 @@ export function usePreviousWeekWinner() {
       return null;
     },
     staleTime: 60000 * 5, // 5 minutes
+  });
+}
+
+/**
+ * Total number of game sessions ever published (all-time play count).
+ * Each score event corresponds to one paid life/game run.
+ */
+export function useAllTimePlayCount() {
+  const { nostr } = useNostr();
+
+  return useQuery({
+    queryKey: ['leaderboard', 'all-time-play-count'],
+    queryFn: async () => {
+      // Query a generous window from genesis; this is still bounded by relay retention.
+      const events = await nostr.query([{
+        kinds: [GAME_SCORE_KIND],
+        '#t': [GAME_TAG],
+        limit: 10000,
+      }]);
+
+      // Validate format before counting
+      const validEvents = events
+        .map(eventToEntry)
+        .filter((e): e is LeaderboardEntry => e !== null);
+
+      return validEvents.length;
+    },
+    refetchInterval: 30000,
+    staleTime: 15000,
   });
 }

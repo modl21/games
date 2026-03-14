@@ -11,6 +11,7 @@ import { Leaderboard } from '@/components/Leaderboard';
 import { WeeklyWinnerBanner } from '@/components/WeeklyWinnerBanner';
 import { GameOverOverlay } from '@/components/GameOverOverlay';
 import { usePublishScore } from '@/hooks/usePublishScore';
+import { useAllTimePlayCount } from '@/hooks/useLeaderboard';
 import { useIsMobile } from '@/hooks/useIsMobile';
 import type { GamePhase } from '@/lib/gameTypes';
 import type { GameInvoice } from '@/lib/lightning';
@@ -38,6 +39,7 @@ const Index = () => {
   const signerRef = useRef<NSecSigner | null>(null);
   const keysRef = useRef({ left: false, right: false, shoot: false });
   const { mutateAsync: publishScore, isPending: isPublishing } = usePublishScore();
+  const { data: allTimePlayCount } = useAllTimePlayCount();
 
   const handleStartGame = useCallback(() => {
     setShowPayment(true);
@@ -214,6 +216,13 @@ const Index = () => {
         {isMobile && phase === 'playing' && (
           <TouchControls keysRef={keysRef} />
         )}
+
+        {/* Discrete all-time play counter */}
+        <div className="w-full max-w-md mx-auto text-right -mt-1 mb-1">
+          <span className="text-[10px] font-pixel text-muted-foreground/40 tracking-wide">
+            RUNS: {(allTimePlayCount ?? 0).toLocaleString()}
+          </span>
+        </div>
 
         {/* Leaderboard */}
         <Leaderboard />
