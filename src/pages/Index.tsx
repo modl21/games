@@ -102,6 +102,29 @@ const Index = () => {
       </div>
 
       <div className="relative z-10 flex flex-col items-center min-h-full px-4 py-6 gap-5">
+        {/* Citadel Arcade Header */}
+        <header className="w-full max-w-lg flex flex-col sm:flex-row items-center justify-between gap-4 mb-4">
+          <a
+            href="https://citadelarcade.com"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex h-10 items-center justify-center rounded-sm bg-white px-3 transition-opacity hover:opacity-90"
+          >
+            <span className="text-[13px] font-[900] tracking-tighter text-black uppercase font-sans">
+              CITADEL ARCADE
+            </span>
+          </a>
+
+          <a
+            href="https://primal.net/odell"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-[10px] font-black uppercase tracking-[0.2em] text-white/20 hover:text-white transition-colors font-sans"
+          >
+            CURATED BY <span className="text-white/40">ODELL</span>
+          </a>
+        </header>
+
         {/* Weekly Winner Banner */}
         <WeeklyWinnerBanner />
 
