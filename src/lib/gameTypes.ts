@@ -3,33 +3,23 @@ export interface Position {
   y: number;
 }
 
-export interface Player extends Position {
-  width: number;
-  height: number;
-}
+export type Direction = 'up' | 'down' | 'left' | 'right';
 
-export interface Bullet extends Position {
-  width: number;
-  height: number;
-  active: boolean;
-}
-
-export interface Enemy extends Position {
-  width: number;
-  height: number;
-  alive: boolean;
-  type: number; // 0-3 for different visual types
-}
-
-export interface Star {
+export interface SnakeSegment {
   x: number;
   y: number;
-  size: number;
-  speed: number;
-  brightness: number;
 }
 
-export interface Particle {
+export interface Food {
+  x: number;
+  y: number;
+  type: 'rat' | 'scorpion' | 'cactus_fruit' | 'gold_nugget';
+  points: number;
+  /** Lifetime in ticks before despawning (only for special items) */
+  lifetime: number;
+}
+
+export interface DustParticle {
   x: number;
   y: number;
   vx: number;
@@ -40,19 +30,31 @@ export interface Particle {
   size: number;
 }
 
+export interface Tumbleweed {
+  x: number;
+  y: number;
+  speed: number;
+  size: number;
+  rotation: number;
+}
+
 export interface GameState {
-  player: Player;
-  playerBullets: Bullet[];
-  enemyBullets: Bullet[];
-  enemies: Enemy[];
-  stars: Star[];
-  particles: Particle[];
+  snake: SnakeSegment[];
+  direction: Direction;
+  nextDirection: Direction;
+  food: Food[];
+  tumbleweeds: Tumbleweed[];
+  dustParticles: DustParticle[];
   score: number;
-  wave: number;
-  enemyDirection: 1 | -1;
+  tickCount: number;
   gameOver: boolean;
-  lastBulletTime: number;
+  /** Current speed (ticks per movement) — lower = faster */
+  moveInterval: number;
+  lastMoveAt: number;
   screenShake: number;
+  /** Grid dimensions */
+  gridWidth: number;
+  gridHeight: number;
 }
 
 export type GamePhase = 'idle' | 'paying' | 'ready' | 'playing' | 'gameOver';
